@@ -1,0 +1,55 @@
+manifest_version: 2
+name: ghostbox
+version: 0.1.0
+description: Speculative shadow-execution sandbox and cryptographic blast-radius verifier for autonomous agent tools.
+author: Arjun Bagga <arjunbagga-xyz>
+license: MIT
+homepage: https://github.com/arjunbagga-xyz/hermes-ghostbox
+repository: https://github.com/arjunbagga-xyz/hermes-ghostbox
+min_hermes_version: 0.5.0
+max_hermes_version: 1.99.0
+categories:
+- developer-tools
+- security
+- workflow
+tags:
+- sandbox
+- shadow-execution
+- blast-radius
+- git-worktree
+- speculative-execution
+requires_env: []
+optional_env: []
+python_dependencies:
+- pydantic>=2.5,<3.0
+- fastapi>=0.109,<1.0
+provides_tools:
+- ghostbox_spawn_shadow
+- ghostbox_compute_blast
+- ghostbox_fast_forward_commit
+- ghostbox_discard_shadow
+provides_hooks:
+- on_session_start
+config_schema:
+  max_shadows:
+    type: integer
+    default: 5
+    description: Maximum concurrent active shadow universes retained in .hermes/ghostbox.
+  auto_isolate_mutations:
+    type: boolean
+    default: true
+    description: Automatically intercept mutating filesystem and bash commands into shadow worktrees.
+  enforce_network_loopback:
+    type: boolean
+    default: true
+    description: Trap and log outbound socket connections to prevent untrusted exfiltration.
+web:
+  enabled: true
+  mount_path: /ghostbox
+desktop:
+  enabled: true
+  entry: desktop/plugin.js
+  surfaces:
+  - transcript
+  - sidebar
+  - statusbar
