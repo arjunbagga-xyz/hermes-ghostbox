@@ -1,7 +1,7 @@
 manifest_version: 2
 name: ghostbox
 version: 0.1.0
-description: Speculative shadow-execution sandbox and cryptographic blast-radius verifier for autonomous agent tools.
+description: Speculative shadow-execution sandbox and blast-radius verifier for autonomous agent tools using git worktrees.
 author: Arjun Bagga <arjunbagga-xyz>
 license: MIT
 homepage: https://github.com/arjunbagga-xyz/hermes-ghostbox
@@ -35,14 +35,6 @@ config_schema:
     type: integer
     default: 5
     description: Maximum concurrent active shadow universes retained in .hermes/ghostbox.
-  auto_isolate_mutations:
-    type: boolean
-    default: true
-    description: Automatically intercept mutating filesystem and bash commands into shadow worktrees.
-  enforce_network_loopback:
-    type: boolean
-    default: true
-    description: Trap and log outbound socket connections to prevent untrusted exfiltration.
 web:
   enabled: true
   mount_path: /ghostbox

@@ -4,31 +4,31 @@ import { jsx, jsxs } from 'react/jsx-runtime';
 
 function GhostBoxDirectiveCard({ attrs }) {
   const [expanded, setExpanded] = useState(true);
-  const [status, setStatus] = useState((attrs && attrs.status) || 'verified');
+  const [status, setStatus] = useState((attrs && attrs.status) || 'active');
   
   const shadowId = (attrs && attrs.shadow_id) || 'shadow_7f8a';
   const score = (attrs && attrs.safety_score) || '98';
   const filesChanged = (attrs && attrs.files_changed) || '0';
   const linesAdded = (attrs && attrs.lines_added) || '0';
   const linesRemoved = (attrs && attrs.lines_removed) || '0';
-  const secretsLeaked = (attrs && attrs.secrets_leaked) || '0';
-  const egressBlocked = (attrs && attrs.egress_blocked) || '0';
 
   const handleCommit = () => {
     setStatus('committed');
-    if (host && typeof host.dispatchAction === 'function') {
-      host.dispatchAction('hermes:send-input', {
-        text: `ghostbox_fast_forward_commit(shadow_id="${shadowId}")`
-      });
+    const cmd = `ghostbox_fast_forward_commit(shadow_id="${shadowId}")`;
+    if (host && host.composer && typeof host.composer.submit === 'function') {
+      host.composer.submit(cmd);
+    } else if (host && host.composer && typeof host.composer.insertText === 'function') {
+      host.composer.insertText(cmd);
     }
   };
 
   const handleDiscard = () => {
     setStatus('discarded');
-    if (host && typeof host.dispatchAction === 'function') {
-      host.dispatchAction('hermes:send-input', {
-        text: `ghostbox_discard_shadow(shadow_id="${shadowId}")`
-      });
+    const cmd = `ghostbox_discard_shadow(shadow_id="${shadowId}")`;
+    if (host && host.composer && typeof host.composer.submit === 'function') {
+      host.composer.submit(cmd);
+    } else if (host && host.composer && typeof host.composer.insertText === 'function') {
+      host.composer.insertText(cmd);
     }
   };
 
@@ -89,20 +89,6 @@ function GhostBoxDirectiveCard({ attrs }) {
                   jsx('div', { style: { fontSize: '10px', color: 'var(--ui-text-secondary)' }, children: 'FILES MODIFIED' }),
                   jsx('div', { style: { fontWeight: 700, fontFamily: 'var(--ui-font-mono)' }, children: `${filesChanged} files` })
                 ]
-              }),
-              jsxs('div', {
-                style: { padding: '6px 8px', borderRadius: '6px', background: 'var(--ui-surface-1, rgba(255,255,255,0.04))' },
-                children: [
-                  jsx('div', { style: { fontSize: '10px', color: 'var(--ui-text-secondary)' }, children: 'SECRETS SAFE' }),
-                  jsx('div', { style: { fontWeight: 700, fontFamily: 'var(--ui-font-mono)', color: 'var(--ui-accent)' }, children: '0 Leaks' })
-                ]
-              }),
-              jsxs('div', {
-                style: { padding: '6px 8px', borderRadius: '6px', background: 'var(--ui-surface-1, rgba(255,255,255,0.04))' },
-                children: [
-                  jsx('div', { style: { fontSize: '10px', color: 'var(--ui-text-secondary)' }, children: 'NETWORK EGRESS' }),
-                  jsx('div', { style: { fontWeight: 700, fontFamily: 'var(--ui-font-mono)' }, children: `${egressBlocked} Trapped` })
-                ]
               })
             ]
           }),
@@ -111,21 +97,21 @@ function GhostBoxDirectiveCard({ attrs }) {
             children: [
               jsx('button', {
                 onClick: handleDiscard,
-                disabled: status !== 'verified',
+                disabled: status === 'committed' || status === 'discarded',
                 style: {
                   padding: '5px 12px',
                   borderRadius: '6px',
                   border: '1px solid var(--ui-stroke-secondary, var(--ui-border))',
                   background: 'transparent',
                   color: 'var(--ui-text-secondary)',
-                  cursor: status === 'verified' ? 'pointer' : 'default',
+                  cursor: (status !== 'committed' && status !== 'discarded') ? 'pointer' : 'default',
                   fontSize: '11px'
                 },
                 children: 'Discard Shadow'
               }),
               jsx('button', {
                 onClick: handleCommit,
-                disabled: status !== 'verified',
+                disabled: status === 'committed' || status === 'discarded',
                 style: {
                   padding: '5px 12px',
                   borderRadius: '6px',
@@ -133,7 +119,7 @@ function GhostBoxDirectiveCard({ attrs }) {
                   background: 'var(--ui-accent)',
                   color: 'var(--card, var(--ui-surface-2))',
                   fontWeight: 600,
-                  cursor: status === 'verified' ? 'pointer' : 'default',
+                  cursor: (status !== 'committed' && status !== 'discarded') ? 'pointer' : 'default',
                   fontSize: '11px'
                 },
                 children: '⚡ Fast-Forward Commit'
@@ -155,10 +141,9 @@ function GhostBoxSidebarPane() {
       jsxs('div', {
         style: { border: '1px solid var(--ui-stroke-secondary, var(--ui-border))', borderRadius: '6px', padding: '8px' },
         children: [
-          jsx('div', { style: { color: 'var(--ui-accent)', fontWeight: 600 }, children: 'Hermetic Isolation Engine' }),
+          jsx('div', { style: { color: 'var(--ui-accent)', fontWeight: 600 }, children: 'Git Worktree Sandbox' }),
           jsx('div', { style: { fontSize: '11px', marginTop: '4px' }, children: '• Ephemeral Git Worktree: Ready' }),
-          jsx('div', { style: { fontSize: '11px' }, children: '• Subprocess Secret Scrubbing: Enforced' }),
-          jsx('div', { style: { fontSize: '11px' }, children: '• Loopback Network Trap: 127.0.0.1:28888' })
+          jsx('div', { style: { fontSize: '11px' }, children: '• Subprocess Secret Scrubbing: Enforced' })
         ]
       })
     ]

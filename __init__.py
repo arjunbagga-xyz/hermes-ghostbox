@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .engine import (_ensure_json_str,
+from .engine import (
+    _ensure_json_str,
     GHOST_BLAST_SCHEMA,
     GHOST_COMMIT_SCHEMA,
     GHOST_DISCARD_SCHEMA,
@@ -13,10 +14,6 @@ from .engine import (_ensure_json_str,
     handle_ghostbox_discard_shadow,
     handle_ghostbox_fast_forward_commit,
     handle_ghostbox_spawn_shadow,
-)
-from .middleware import (
-    ghostbox_tool_execution_middleware,
-    ghostbox_tool_request_middleware,
 )
 
 
@@ -69,7 +66,3 @@ def register(ctx: Any) -> None:
     )
 
     ctx.register_hook("on_session_start", on_session_start_hook)
-
-    if hasattr(ctx, "register_middleware"):
-        ctx.register_middleware("tool_request", ghostbox_tool_request_middleware)
-        ctx.register_middleware("tool_execution", ghostbox_tool_execution_middleware)

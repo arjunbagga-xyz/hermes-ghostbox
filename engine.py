@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -12,11 +13,23 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+SHADOW_ID_REGEX = re.compile(r"^shadow_[A-Za-z0-9_-]+_[0-9a-f]{6}$")
+
 try:
     from agent.secret_scope import get_secret
 except ImportError:
     def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
         return default
+
+try:
+    from agent.file_safety import get_write_denied_error
+except ImportError:
+    def get_write_denied_error(dest_path: str) -> Optional[str]:
+        p = Path(dest_path).resolve()
+        for forbidden in (".git", ".env", ".ssh", "/etc", "C:\\Windows"):
+            if forbidden.lower() in str(p).lower():
+                return f"Write denied to protected path: {p}"
+        return None
 
 try:
     from hermes_cli.plugin_events import emit_plugin_event
@@ -59,9 +72,15 @@ class GhostUniverseManager:
             self.workspace_root = Path(workspace_root).resolve()
             
         self.ghost_dir = self.workspace_root / ".hermes" / "ghostbox"
-        self.ghost_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_git_exclude()
+        self._initialized = False
         self.active_shadows: Dict[str, Dict[str, Any]] = {}
+        self.max_shadows = 5
+
+    def _ensure_ready(self) -> None:
+        if not self._initialized:
+            self.ghost_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_git_exclude()
+            self._initialized = True
 
     def _ensure_git_exclude(self) -> None:
         """Add .hermes/ into local .git/info/exclude so it never dirties git status."""
@@ -88,7 +107,21 @@ class GhostUniverseManager:
         return check.returncode == 0
 
     def spawn_shadow(self, label: Optional[str] = None) -> Dict[str, Any]:
-        """Create an ephemeral detached git worktree or isolated shadow folder for speculative execution."""
+        """Create an ephemeral detached git worktree for speculative execution."""
+        if len(self.active_shadows) >= self.max_shadows:
+            return {
+                "status": "error",
+                "error": f"Max concurrent shadow universes ({self.max_shadows}) reached. Discard old shadows first.",
+            }
+
+        is_git = self.is_git_repo()
+        if not is_git:
+            return {
+                "status": "error",
+                "error": "Ghostbox requires a git repository to create isolated shadow worktrees safely. Refusing non-git directory copy.",
+            }
+
+        self._ensure_ready()
         clean_label = "".join(c for c in (label or "run") if c.isalnum() or c in "-_")[:16]
         shadow_id = f"shadow_{clean_label}_{secrets.token_hex(3)}"
         shadow_path = self.ghost_dir / shadow_id
@@ -96,21 +129,18 @@ class GhostUniverseManager:
         if shadow_path.exists():
             shutil.rmtree(shadow_path, ignore_errors=True)
 
-        is_git = self.is_git_repo()
-        if is_git:
-            cmd = ["git", "worktree", "add", "--detach", str(shadow_path), "HEAD"]
-            res = subprocess.run(
-                cmd,
-                cwd=str(self.workspace_root),
-                capture_output=True,
-                text=True,
-            )
-            if res.returncode != 0:
-                # Fallback to directory copy if worktree add fails (e.g. bare repo or detached HEAD)
-                shutil.copytree(str(self.workspace_root), str(shadow_path), ignore=shutil.ignore_patterns(".hermes", ".git"))
-        else:
-            # Non-git workspace fallback: copy workspace files into shadow directory
-            shutil.copytree(str(self.workspace_root), str(shadow_path), ignore=shutil.ignore_patterns(".hermes"))
+        cmd = ["git", "worktree", "add", "--detach", str(shadow_path), "HEAD"]
+        res = subprocess.run(
+            cmd,
+            cwd=str(self.workspace_root),
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0:
+            return {
+                "status": "error",
+                "error": f"Failed to create git worktree: {res.stderr.strip() or res.stdout.strip()}",
+            }
 
         created_info = {
             "shadow_id": shadow_id,
@@ -199,24 +229,19 @@ class GhostUniverseManager:
 
         directive = (
             f'::ghostbox-card[shadow_id="{shadow_id}" '
-            f'status="verified" '
             f'safety_score={safety_score} '
             f'files_changed={files_changed} '
             f'lines_added={lines_added} '
-            f'lines_removed={lines_removed} '
-            f'secrets_leaked=0 '
-            f'egress_blocked=0]'
+            f'lines_removed={lines_removed}]'
         )
 
         blast_result = {
             "shadow_id": shadow_id,
-            "status": "verified",
+            "status": "computed",
             "safety_score": safety_score,
             "files_changed": files_changed,
             "lines_added": lines_added,
             "lines_removed": lines_removed,
-            "secrets_leaked": 0,
-            "egress_blocked": 0,
             "tree_hash": tree_hash,
             "files": file_list,
             "directive": directive,
@@ -227,7 +252,7 @@ class GhostUniverseManager:
         return blast_result
 
     def fast_forward_commit(self, shadow_id: str) -> Dict[str, Any]:
-        """Fast-forward commit: apply shadow changes to the host workspace atomically."""
+        """Fast-forward commit: apply shadow changes to the host workspace atomically with file safety checks."""
         start_t = time.perf_counter()
         shadow_info = self.active_shadows.get(shadow_id)
         if not shadow_info:
@@ -266,21 +291,16 @@ class GhostUniverseManager:
                     rel_name = line[3:].strip()
                     src_f = shadow_path / rel_name
                     dst_f = self.workspace_root / rel_name
-                    if src_f.is_file():
+                    if src_f.is_file() and not src_f.is_symlink():
+                        denied = get_write_denied_error(str(dst_f))
+                        if denied:
+                            logger.warning(f"Write denied for file {dst_f}: {denied}")
+                            continue
                         dst_f.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(str(src_f), str(dst_f))
                         applied_files += 1
         else:
-            # Direct file synchronization for non-git workspaces
-            for p in shadow_path.rglob("*"):
-                if p.is_file():
-                    rel = p.relative_to(shadow_path)
-                    if any(part.startswith(".hermes") for part in rel.parts):
-                        continue
-                    dst = self.workspace_root / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(p), str(dst))
-                    applied_files += 1
+            return {"status": "error", "error": "Fast-forward commit only supported for git shadow worktrees"}
 
         duration_ms = round((time.perf_counter() - start_t) * 1000, 2)
         self.discard_shadow(shadow_id)
@@ -296,88 +316,131 @@ class GhostUniverseManager:
         return result
 
     def discard_shadow(self, shadow_id: str) -> Dict[str, Any]:
-        """Vaporize shadow worktree with zero host residue."""
-        shadow_info = self.active_shadows.pop(shadow_id, None)
-        shadow_path = self.ghost_dir / shadow_id
+        """Vaporize shadow worktree with zero host residue safely."""
+        if not isinstance(shadow_id, str) or not SHADOW_ID_REGEX.match(shadow_id):
+            return {"status": "error", "error": f"Invalid shadow_id '{shadow_id}'. Must match pattern ^shadow_[A-Za-z0-9_-]+_[0-9a-f]{{6}}$"}
 
-        if shadow_path.exists():
+        self._ensure_ready()
+        resolved_ghost_dir = self.ghost_dir.resolve()
+        target_path = (self.ghost_dir / shadow_id).resolve()
+        try:
+            target_path.relative_to(resolved_ghost_dir)
+        except ValueError:
+            return {"status": "error", "error": f"Path traversal attempt rejected for shadow_id '{shadow_id}'"}
+
+        shadow_info = self.active_shadows.pop(shadow_id, None)
+
+        if target_path.exists():
             if self.is_git_repo():
                 subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(shadow_path)],
+                    ["git", "worktree", "remove", "--force", str(target_path)],
                     cwd=str(self.workspace_root),
                     capture_output=True,
                 )
-            if shadow_path.exists():
-                shutil.rmtree(shadow_path, ignore_errors=True)
+            if target_path.exists():
+                shutil.rmtree(target_path, ignore_errors=True)
 
         res = {"status": "discarded", "shadow_id": shadow_id}
         emit_plugin_event("ghostbox", "shadow_discarded", res)
         return res
 
 
-GHOST_MANAGER = GhostUniverseManager()
+_GHOST_MANAGER: Optional[GhostUniverseManager] = None
 
-# Tool schemas and handler wrappers
+
+def get_ghost_manager(workspace_root: Optional[Path] = None) -> GhostUniverseManager:
+    """Lazily instantiate GhostUniverseManager on first tool call."""
+    global _GHOST_MANAGER
+    if _GHOST_MANAGER is None:
+        _GHOST_MANAGER = GhostUniverseManager(workspace_root=workspace_root)
+    return _GHOST_MANAGER
+
+
+class _GhostManagerProxy:
+    """Proxy object so any direct attribute access on GHOST_MANAGER remains backwards-compatible."""
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_ghost_manager(), name)
+
+
+GHOST_MANAGER = _GhostManagerProxy()
+
+# Tool schemas wrapped as standard Hermes tool descriptors
 GHOST_SPAWN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "label": {
-            "type": "string",
-            "description": "Optional label for this shadow universe (e.g. 'refactor_auth', 'test_migration').",
-        }
+    "name": "ghostbox_spawn_shadow",
+    "description": "Create an ephemeral detached git worktree in .hermes/ghostbox for speculative agent execution.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "label": {
+                "type": "string",
+                "description": "Optional label for this shadow universe (e.g. 'refactor_auth', 'test_migration').",
+            }
+        },
+        "required": [],
     },
-    "required": [],
 }
 
 GHOST_BLAST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "shadow_id": {
-            "type": "string",
-            "description": "Unique identifier of the shadow universe to compute blast radius for.",
-        }
+    "name": "ghostbox_compute_blast",
+    "description": "Compute the git diff and blast radius between the shadow worktree and the workspace.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "shadow_id": {
+                "type": "string",
+                "description": "Unique identifier of the shadow universe to compute blast radius for.",
+            }
+        },
+        "required": ["shadow_id"],
     },
-    "required": ["shadow_id"],
 }
 
 GHOST_COMMIT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "shadow_id": {
-            "type": "string",
-            "description": "Unique identifier of the shadow universe to fast-forward commit to host reality.",
-        }
+    "name": "ghostbox_fast_forward_commit",
+    "description": "Fast-forward commit: apply shadow changes to the host workspace atomically.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "shadow_id": {
+                "type": "string",
+                "description": "Unique identifier of the shadow universe to fast-forward commit to host reality.",
+            }
+        },
+        "required": ["shadow_id"],
     },
-    "required": ["shadow_id"],
 }
 
 GHOST_DISCARD_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "shadow_id": {
-            "type": "string",
-            "description": "Unique identifier of the shadow universe to discard and vaporize.",
-        }
+    "name": "ghostbox_discard_shadow",
+    "description": "Discard and vaporize an active shadow git worktree.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "shadow_id": {
+                "type": "string",
+                "description": "Unique identifier of the shadow universe to discard and vaporize.",
+            }
+        },
+        "required": ["shadow_id"],
     },
-    "required": ["shadow_id"],
 }
 
 
 def handle_ghostbox_spawn_shadow(params: Dict[str, Any]) -> str:
     label = params.get("label") if isinstance(params, dict) else None
-    return json.dumps(GHOST_MANAGER.spawn_shadow(label))
+    return json.dumps(get_ghost_manager().spawn_shadow(label))
 
 
 def handle_ghostbox_compute_blast(params: Dict[str, Any]) -> str:
     shadow_id = params.get("shadow_id", "") if isinstance(params, dict) else str(params)
-    return json.dumps(GHOST_MANAGER.compute_blast(shadow_id))
+    return json.dumps(get_ghost_manager().compute_blast(shadow_id))
 
 
 def handle_ghostbox_fast_forward_commit(params: Dict[str, Any]) -> str:
     shadow_id = params.get("shadow_id", "") if isinstance(params, dict) else str(params)
-    return json.dumps(GHOST_MANAGER.fast_forward_commit(shadow_id))
+    return json.dumps(get_ghost_manager().fast_forward_commit(shadow_id))
 
 
 def handle_ghostbox_discard_shadow(params: Dict[str, Any]) -> str:
     shadow_id = params.get("shadow_id", "") if isinstance(params, dict) else str(params)
-    return json.dumps(GHOST_MANAGER.discard_shadow(shadow_id))
+    return json.dumps(get_ghost_manager().discard_shadow(shadow_id))
